@@ -1,0 +1,122 @@
+trigger:
+  - '*'
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  # Artifact collection
+  COLLECTION_OUTPUT_DIR: '$(Build.ArtifactStagingDirectory)/veracode-artifacts'
+  VERACODE_ZIP_NAME: 'veracode-scan-artifacts.zip'
+  VERACODE_ZIP_PATH: '$(Build.ArtifactStagingDirectory)/$(VERACODE_ZIP_NAME)'
+
+stages:
+- stage: CollectArtifacts
+  displayName: 'Collect Java Artifacts for Veracode'
+  dependsOn: Build
+  condition: succeeded()
+  jobs:
+  - job: CollectArtifacts
+    displayName: 'Collect and Zip Artifacts'
+    steps:
+    # Run the artifact collector
+    - task: Bash@3
+      displayName: 'Collect Java Artifacts'
+      inputs:
+        targetType: 'inline'
+        script: |
+          echo "=== Starting Java Artifact Collection ==="
+          echo "Build artifacts directory: $(Build.ArtifactStagingDirectory)"
+          echo "Collection output directory: $(COLLECTION_OUTPUT_DIR)"
+          echo ""
+          
+          # Run the collector script
+          ./collect_java_artifacts.sh \
+            -o "$(COLLECTION_OUTPUT_DIR)" \
+            "$(Build.ArtifactStagingDirectory)"
+          
+          echo ""
+          echo "=== Collection Complete ==="
+          echo "Collected artifacts:"
+          ls -la "$(COLLECTION_OUTPUT_DIR)"
+          
+          if [ -f "$(COLLECTION_OUTPUT_DIR)/collection_summary.txt" ]; then
+            echo ""
+            echo "Collection summary:"
+            cat "$(COLLECTION_OUTPUT_DIR)/collection_summary.txt"
+          fi
+    
+    # Zip the collected artifacts for Veracode
+    - task: Bash@3
+      displayName: 'Zip Artifacts for Veracode'
+      inputs:
+        targetType: 'inline'
+        script: |
+          echo "=== Zipping Artifacts for Veracode ==="
+          
+          # Create zip file from collected artifacts
+          cd "$(COLLECTION_OUTPUT_DIR)"
+          zip -r "../$(VERACODE_ZIP_NAME)" . -x "*.git*" "*.DS_Store*"
+          
+          # Go back to build directory
+          cd "$(Build.ArtifactStagingDirectory)"
+          
+          echo ""
+          echo "=== Zip Complete ==="
+          echo "Veracode artifacts zip: $(VERACODE_ZIP_PATH)"
+          echo "Zip file size:"
+          ls -lh "$(VERACODE_ZIP_PATH)"
+          
+          # Set pipeline variables for next steps
+          echo "##vso[task.setvariable variable=VERACODE_ZIP_PATH]$(VERACODE_ZIP_PATH)"
+          echo "##vso[task.setvariable variable=VERACODE_ZIP_NAME]$(VERACODE_ZIP_NAME)"
+          echo "##vso[task.setvariable variable=VERACODE_ARTIFACTS_DIR]$(COLLECTION_OUTPUT_DIR)"
+    
+    # Publish the zip file as a build artifact
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish Veracode Artifacts Zip'
+      inputs:
+        pathToPublish: '$(VERACODE_ZIP_PATH)'
+        artifactName: 'veracode-scan-artifacts'
+        publishLocation: 'Container'
+    
+    # Publish collection summary
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish Collection Summary'
+      inputs:
+        pathToPublish: '$(COLLECTION_OUTPUT_DIR)/collection_summary.txt'
+        artifactName: 'artifact-collection-summary'
+        publishLocation: 'Container'
+      condition: succeeded()
+
+- stage: VeracodeScan
+  displayName: 'Veracode Pipeline Scan'
+  dependsOn: CollectArtifacts
+  condition: succeeded()
+  jobs:
+  - job: VeracodeScan
+    displayName: 'Run Veracode Pipeline Scan'
+    steps:
+    # Example Veracode pipeline-scan task
+    # Replace with your actual Veracode task configuration
+    - task: Bash@3
+      displayName: 'Veracode Pipeline Scan'
+      inputs:
+        targetType: 'inline'
+        script: |
+          echo "=== Starting Veracode Pipeline Scan ==="
+          echo "Scanning artifacts from: $(VERACODE_ZIP_PATH)"
+          echo "Artifacts directory: $(VERACODE_ARTIFACTS_DIR)"
+          echo "Zip file name: $(VERACODE_ZIP_NAME)"
+          
+          # Example Veracode pipeline-scan command
+          veracode-pipeline-scan \
+            --file "$(VERACODE_ZIP_PATH)" \
+            --veracode-api-id "$(VERACODE_API_ID)" \
+            --veracode-api-key "$(VERACODE_API_KEY)" \
+            --fail-on-severity "Very High,High" \
+            --output-format "json" \
+            --output-file "veracode-scan-results.json"
+          
+          echo "Veracode scan completed successfully!"
+          echo "Results available in veracode-scan-results.json"
