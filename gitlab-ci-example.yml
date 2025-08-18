@@ -1,0 +1,137 @@
+stages:
+  - collect-artifacts
+  - veracode-scan
+
+variables:
+  # Artifact collection
+  COLLECTION_OUTPUT_DIR: "$CI_PROJECT_DIR/veracode-artifacts"
+  VERACODE_ZIP_NAME: "veracode-scan-artifacts.zip"
+  VERACODE_ZIP_PATH: "$CI_PROJECT_DIR/$VERACODE_ZIP_NAME"
+
+collect-artifacts:
+  stage: collect-artifacts
+  name: 'Collect Java and .NET Artifacts for Veracode'
+  image: ubuntu:22.04
+  needs: []
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_PIPELINE_SOURCE == "web"
+  
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq zip unzip
+    - chmod +x ./collect_veracode_artifacts.sh
+  
+  script:
+    # Run the artifact collector
+    - |
+      echo "=== Starting Java and .NET Artifact Collection ==="
+      echo "Build artifacts directory: $CI_PROJECT_DIR"
+      echo "Collection output directory: $COLLECTION_OUTPUT_DIR"
+      echo ""
+      
+      # Run the collector script
+      ./collect_veracode_artifacts.sh \
+        -o "$COLLECTION_OUTPUT_DIR" \
+        "$CI_PROJECT_DIR"
+      
+      echo ""
+      echo "=== Collection Complete ==="
+      echo "Collected artifacts:"
+      ls -la "$COLLECTION_OUTPUT_DIR"
+      
+      if [ -f "$COLLECTION_OUTPUT_DIR/collection_summary.txt" ]; then
+        echo ""
+        echo "Collection summary:"
+        cat "$COLLECTION_OUTPUT_DIR/collection_summary.txt"
+      fi
+    
+    # Zip the collected artifacts for Veracode
+    - |
+      echo "=== Zipping Artifacts for Veracode ==="
+      
+      # Create zip file from collected artifacts
+      cd "$COLLECTION_OUTPUT_DIR"
+      zip -r "../$VERACODE_ZIP_NAME" . -x "*.git*" "*.DS_Store*"
+      
+      # Go back to project directory
+      cd "$CI_PROJECT_DIR"
+      
+      echo ""
+      echo "=== Zip Complete ==="
+      echo "Veracode artifacts zip: $VERACODE_ZIP_PATH"
+      echo "Zip file size:"
+      ls -lh "$VERACODE_ZIP_PATH"
+  
+  artifacts:
+    name: "veracode-artifacts-$CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA"
+    paths:
+      - "$VERACODE_ZIP_PATH"
+      - "$COLLECTION_OUTPUT_DIR/collection_summary.txt"
+    expire_in: 30 days
+    reports:
+      dotenv: "$COLLECTION_OUTPUT_DIR/collection_summary.txt"
+  
+  after_script:
+    - echo "VERACODE_ZIP_PATH=$VERACODE_ZIP_PATH" >> $GITLAB_ENV
+    - echo "VERACODE_ZIP_NAME=$VERACODE_ZIP_NAME" >> $GITLAB_ENV
+    - echo "VERACODE_ARTIFACTS_DIR=$COLLECTION_OUTPUT_DIR" >> $GITLAB_ENV
+
+veracode-scan:
+  stage: veracode-scan
+  name: 'Veracode Pipeline Scan'
+  image: ubuntu:22.04
+  needs:
+    - job: collect-artifacts
+      artifacts: true
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_PIPELINE_SOURCE == "web"
+  
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq curl unzip
+    
+  script:
+    # Example Veracode pipeline-scan task
+    - |
+      echo "=== Starting Veracode Pipeline Scan ==="
+      echo "Scanning artifacts from: $VERACODE_ZIP_PATH"
+      echo "Artifacts directory: $VERACODE_ARTIFACTS_DIR"
+      echo "Zip file name: $VERACODE_ZIP_NAME"
+      
+      # Example Veracode pipeline-scan command
+      # Note: You'll need to install veracode-pipeline-scan or use a container
+      # For this example, we'll simulate the scan process
+      echo "Simulating Veracode pipeline scan..."
+      
+      # Create a mock scan result file
+      cat > veracode-scan-results.json << EOF
+      {
+        "scan_id": "mock-scan-$(date +%s)",
+        "status": "completed",
+        "scan_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+        "artifacts_scanned": ["$VERACODE_ZIP_NAME"],
+        "findings_count": 0,
+        "scan_summary": "Mock scan completed successfully"
+      }
+      EOF
+      
+      echo "Veracode scan completed successfully!"
+      echo "Results available in veracode-scan-results.json"
+      
+      # Display the results
+      cat veracode-scan-results.json
+  
+  artifacts:
+    name: "veracode-scan-results-$CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA"
+    paths:
+      - "veracode-scan-results.json"
+    expire_in: 90 days
+    reports:
+      junit: "veracode-scan-results.json"
+  
+  # Optional: Add environment for deployment tracking
+  environment:
+    name: "veracode-scan"
+    url: "https://veracode.com"

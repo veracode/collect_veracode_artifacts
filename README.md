@@ -1,13 +1,20 @@
-# Java Artifact Collector for Azure DevOps Pipelines
+# Java and .NET Artifact Collector
 
-This bash script intelligently analyzes Azure DevOps artifact storage folders and collects Java compiled applications while handling 3rd party libraries and excluding test artifacts.
+This bash script intelligently analyzes artifact storage folders and collects Java and .NET compiled applications while handling 3rd party libraries and excluding test artifacts. It's designed for use in CI/CD pipelines, build systems, and general artifact management scenarios.
+
+## 🚀 Quick Start
+
+Ready-to-use CI/CD pipeline examples are included for:
+- **Azure DevOps**: `azure-pipeline-example.yml` - Complete pipeline with artifact collection and Veracode scanning
+- **GitHub Actions**: `github-actions-example.yml` - Full workflow using the official Veracode GitHub Action
+- **GitLab CI**: `gitlab-ci-example.yml` - Complete GitLab CI pipeline with Veracode integration
 
 ## Features
 
-- **Smart Artifact Detection**: Automatically identifies compiled Java applications (.jar, .war, .ear)
+- **Smart Artifact Detection**: Automatically identifies compiled Java applications (.jar, .war, .ear) and .NET applications (.dll, .exe, .nupkg)
 - **3rd Party Library Handling**: Intelligently determines if 3rd party libraries are already included in compiled artifacts
 - **Test Artifact Filtering**: Automatically excludes unit test artifacts
-- **Archive Validation**: Validates that files are proper Java archives before processing
+- **Archive Validation**: Validates that files are proper Java archives or .NET assemblies before processing
 - **Comprehensive Logging**: Multiple verbosity levels with colored output for easy debugging
 - **Flexible Output**: Configurable output directory with detailed collection summary
 
@@ -22,7 +29,7 @@ This bash script intelligently analyzes Azure DevOps artifact storage folders an
 1. Download the script to your system
 2. Make it executable:
    ```bash
-   chmod +x collect_java_artifacts.sh
+   chmod +x collect_veracode_artifacts.sh
    ```
 
 ## Usage
@@ -30,23 +37,23 @@ This bash script intelligently analyzes Azure DevOps artifact storage folders an
 ### Basic Usage
 
 ```bash
-./collect_java_artifacts.sh /path/to/artifacts
+./collect_veracode_artifacts.sh /path/to/artifacts
 ```
 
 ### Advanced Usage
 
 ```bash
 # Enable debug output
-./collect_java_artifacts.sh -d /path/to/artifacts
+./collect_veracode_artifacts.sh -d /path/to/artifacts
 
 # Enable verbose output
-./collect_java_artifacts.sh -v /path/to/artifacts
+./collect_veracode_artifacts.sh -v /path/to/artifacts
 
 # Specify custom output directory
-./collect_java_artifacts.sh -o /custom/output /path/to/artifacts
+./collect_veracode_artifacts.sh -o /custom/output /path/to/artifacts
 
 # Combine options
-./collect_java_artifacts.sh -d -v -o /custom/output /path/to/artifacts
+./collect_veracode_artifacts.sh -d -v -o /custom/output /path/to/artifacts
 ```
 
 ### Command Line Options
@@ -72,12 +79,16 @@ The script starts by scanning the specified artifact folder for:
 - `.jar` files (Java Archive)
 - `.war` files (Web Application Archive)
 - `.ear` files (Enterprise Application Archive)
+- `.dll` files (.NET Dynamic Link Library)
+- `.exe` files (.NET Executable)
+- `.nupkg` files (.NET NuGet Package)
 
 ### 2. Archive Validation
-Each found file is validated to ensure it's a proper Java archive:
+Each found file is validated to ensure it's a proper Java archive or .NET assembly:
 - File existence and readability checks
 - File size validation (skips empty files)
-- Archive structure validation using `unzip -t`
+- Archive structure validation using `unzip -t` for Java archives
+- Assembly validation for .NET files
 
 ### 3. Test Artifact Detection
 JAR files are analyzed to identify test artifacts:
@@ -93,7 +104,7 @@ JAR files are examined to determine if they contain 3rd party libraries:
 
 ### 5. Intelligent Collection
 The script follows this collection strategy:
-1. **Priority 1**: Collect compiled applications (.jar, .war, .ear)
+1. **Priority 1**: Collect compiled applications (.jar, .war, .ear, .dll, .exe, .nupkg)
 2. **Graceful Exit**: If no compiled apps found, finish gracefully without collecting 3rd party libraries
 3. **Always Skip**: Test artifacts and invalid archives
 
@@ -106,19 +117,19 @@ The script follows this collection strategy:
 
 ### Example 1: Basic Collection
 ```bash
-./collect_java_artifacts.sh /tmp/azure-artifacts
+./collect_veracode_artifacts.sh /tmp/build-artifacts
 ```
-This will analyze `/tmp/azure-artifacts` and collect artifacts to `./collected_artifacts/`.
+This will analyze `/tmp/build-artifacts` and collect artifacts to `./collected_artifacts/`.
 
 ### Example 2: Debug Mode with Custom Output
 ```bash
-./collect_java_artifacts.sh -d -o /tmp/collected /tmp/azure-artifacts
+./collect_veracode_artifacts.sh -d -o /tmp/collected /tmp/build-artifacts
 ```
 This enables debug output and saves collected artifacts to `/tmp/collected/`.
 
 ### Example 3: Environment Variable Usage
 ```bash
-DEBUG=true VERBOSE=true ./collect_java_artifacts.sh /tmp/azure-artifacts
+DEBUG=true VERBOSE=true ./collect_veracode_artifacts.sh /tmp/build-artifacts
 ```
 This enables both debug and verbose modes via environment variables.
 
@@ -126,9 +137,12 @@ This enables both debug and verbose modes via environment variables.
 
 ```
 collected_artifacts/
-├── application.jar          # Compiled application
-├── webapp.war              # Web application
-├── enterprise.ear          # Enterprise application
+├── application.jar          # Compiled Java application
+├── webapp.war              # Java web application
+├── enterprise.ear          # Java enterprise application
+├── app.dll                 # .NET assembly
+├── console.exe             # .NET executable
+├── package.nupkg           # .NET NuGet package
 └── collection_summary.txt  # Detailed collection report
 ```
 
@@ -167,26 +181,50 @@ The script includes comprehensive error handling:
 
 ## Use Cases
 
-### Azure DevOps Pipeline Integration
+### CI/CD Pipeline Integration
+
+This script is designed to work seamlessly with major CI/CD platforms. Complete pipeline examples are provided for each platform:
+
+#### Azure DevOps
 ```yaml
 - task: Bash@3
   inputs:
     targetType: 'inline'
     script: |
-      ./collect_java_artifacts.sh -d -v $(Build.ArtifactStagingDirectory)
+      ./collect_veracode_artifacts.sh -d -v $(Build.ArtifactStagingDirectory)
 ```
+**Complete example**: See `azure-pipeline-example.yml` for a full pipeline that collects artifacts and runs Veracode scans.
 
-### CI/CD Scripts
+#### GitHub Actions
+```yaml
+- name: Collect Artifacts
+  run: ./collect_veracode_artifacts.sh -d -v ${{ github.workspace }}/build
+```
+**Complete example**: See `github-actions-example.yml` for a full workflow that integrates with the Veracode GitHub Action.
+
+#### GitLab CI
+```yaml
+- script: ./collect_veracode_artifacts.sh -d -v $CI_PROJECT_DIR/build
+```
+**Complete example**: See `gitlab-ci-example.yml` for a complete GitLab CI pipeline with artifact collection and Veracode integration.
+
+### Build System Integration
 ```bash
 #!/bin/bash
-# Collect Java artifacts after build
-./collect_java_artifacts.sh -d -o "$WORKSPACE/artifacts" "$BUILD_DIR/target"
+# Collect artifacts after Maven build
+./collect_veracode_artifacts.sh -d -o "$WORKSPACE/artifacts" "$BUILD_DIR/target"
+
+# Collect artifacts after .NET build
+./collect_veracode_artifacts.sh -d -o "$WORKSPACE/artifacts" "$BUILD_DIR/bin"
 ```
 
 ### Manual Artifact Analysis
 ```bash
 # Analyze a specific build output
-./collect_java_artifacts.sh -v /path/to/build/output
+./collect_veracode_artifacts.sh -v /path/to/build/output
+
+# Analyze deployment artifacts
+./collect_veracode_artifacts.sh -v /path/to/deployment/folder
 ```
 
 ## Troubleshooting

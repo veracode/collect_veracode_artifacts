@@ -1,0 +1,126 @@
+name: Collect Artifacts for Veracode
+
+
+on:
+  workflow_dispatch:
+
+env:
+  # Artifact collection
+  COLLECTION_OUTPUT_DIR: ${{ github.workspace }}/veracode-artifacts
+  VERACODE_ZIP_NAME: veracode-scan-artifacts.zip
+  VERACODE_ZIP_PATH: ${{ github.workspace }}/${{ env.VERACODE_ZIP_NAME }}
+
+jobs:
+  collect-artifacts:
+    name: 'Collect Java and .NET Artifacts for Veracode'
+    runs-on: ubuntu-latest
+    needs: build
+    if: success()
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    # Run the artifact collector
+    - name: Collect Java and .NET Artifacts
+      run: |
+        echo "=== Starting Java and .NET Artifact Collection ==="
+        echo "Build artifacts directory: ${{ github.workspace }}"
+        echo "Collection output directory: ${{ env.COLLECTION_OUTPUT_DIR }}"
+        echo ""
+        
+        # Make script executable
+        chmod +x ./collect_veracode_artifacts.sh
+        
+        # Run the collector script
+        ./collect_veracode_artifacts.sh \
+          -o "${{ env.COLLECTION_OUTPUT_DIR }}" \
+          "${{ github.workspace }}"
+        
+        echo ""
+        echo "=== Collection Complete ==="
+        echo "Collected artifacts:"
+        ls -la "${{ env.COLLECTION_OUTPUT_DIR }}"
+        
+        if [ -f "${{ env.COLLECTION_OUTPUT_DIR }}/collection_summary.txt" ]; then
+          echo ""
+          echo "Collection summary:"
+          cat "${{ env.COLLECTION_OUTPUT_DIR }}/collection_summary.txt"
+        fi
+    
+    # Zip the collected artifacts for Veracode
+    - name: Zip Artifacts for Veracode
+      run: |
+        echo "=== Zipping Artifacts for Veracode ==="
+        
+        # Create zip file from collected artifacts
+        cd "${{ env.COLLECTION_OUTPUT_DIR }}"
+        zip -r "../${{ env.VERACODE_ZIP_NAME }}" . -x "*.git*" "*.DS_Store*"
+        
+        # Go back to workspace directory
+        cd "${{ github.workspace }}"
+        
+        echo ""
+        echo "=== Zip Complete ==="
+        echo "Veracode artifacts zip: ${{ env.VERACODE_ZIP_PATH }}"
+        echo "Zip file size:"
+        ls -lh "${{ env.VERACODE_ZIP_PATH }}"
+    
+    # Upload the zip file as a workflow artifact
+    - name: Upload Veracode Artifacts Zip
+      uses: actions/upload-artifact@v4
+      with:
+        name: veracode-scan-artifacts
+        path: ${{ env.VERACODE_ZIP_PATH }}
+        retention-days: 30
+    
+    # Upload collection summary
+    - name: Upload Collection Summary
+      uses: actions/upload-artifact@v4
+      with:
+        name: artifact-collection-summary
+        path: ${{ env.COLLECTION_OUTPUT_DIR }}/collection_summary.txt
+        retention-days: 30
+      if: success()
+      
+    # Set output variables for next job
+    - name: Set Output Variables
+      run: |
+        echo "VERACODE_ZIP_PATH=${{ env.VERACODE_ZIP_PATH }}" >> $GITHUB_OUTPUT
+        echo "VERACODE_ZIP_NAME=${{ env.VERACODE_ZIP_NAME }}" >> $GITHUB_OUTPUT
+        echo "VERACODE_ARTIFACTS_DIR=${{ env.COLLECTION_OUTPUT_DIR }}" >> $GITHUB_OUTPUT
+
+  veracode-scan:
+    name: 'Veracode Pipeline Scan'
+    runs-on: ubuntu-latest
+    needs: collect-artifacts
+    if: success()
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Download Veracode Artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: veracode-scan-artifacts
+        path: ./
+        
+    - name: Download Collection Summary
+      uses: actions/download-artifact@v4
+      with:
+        name: artifact-collection-summary
+        path: ./
+    
+    # Run Veracode Pipeline Scan using official GitHub Action
+    - name: Veracode Pipeline Scan
+      uses: veracode/veracode-pipeline-scan-action@vXXXX #replace with the latest version
+      with:
+        file: "${{ needs.collect-artifacts.outputs.VERACODE_ZIP_NAME }}"
+        veracode_api_id: ${{ secrets.VERACODE_API_ID }}
+        veracode_api_key: ${{ secrets.VERACODE_API_KEY }}
+        fail_on_severity: "Very High,High"
+        output_format: "json"
+        output_file: "veracode-scan-results.json"
+        timeout: 1800
+        debug: true
