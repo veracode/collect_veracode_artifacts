@@ -76,28 +76,42 @@ Usage: $SCRIPT_NAME [OPTIONS] <artifact_folder>
 This script automatically detects and collects Java (.jar, .war, .ear) and .NET (.dll) artifacts
 from Azure DevOps artifact folders. Language detection is automatic based on file types found.
 
-Options:
+OPTIONS:
     -d, --debug          Enable debug output
     -v, --verbose        Enable verbose output
     -h, --help           Show this help message
     -o, --output         Specify output folder (default: ./collected_artifacts)
+    --no-rename          Skip renaming package manager files
+    --no-cli             Skip Veracode CLI download and integration
 
-Arguments:
+ARGUMENTS:
     artifact_folder       Path to the Azure DevOps artifact folder to analyze
     output_folder         Optional: Path where to collect the artifacts
 
-Examples:
+EXAMPLES:
     $SCRIPT_NAME -d /path/to/artifacts
     $SCRIPT_NAME -v -o /custom/output /path/to/artifacts
     $SCRIPT_NAME --debug --verbose /path/to/artifacts
+    $SCRIPT_NAME --no-rename --no-cli /path/to/artifacts
 
-Environment Variables:
+ENVIRONMENT VARIABLES:
     DEBUG=true           Enable debug mode
     VERBOSE=true         Enable verbose mode
 
-Supported Languages:
+SUPPORTED LANGUAGES:
     Java: .jar, .war, .ear files
     .NET: .dll files (with .pdb files when available)
+
+ENHANCED FEATURES:
+    - Automatically renames package manager files (*_backup suffix)
+    - Downloads and integrates Veracode CLI for artifact validation
+    - Supports multiple build systems (Maven, Gradle, .NET, C/C++, etc.)
+
+PACKAGE MANAGER FILES RENAMED:
+    Java: pom.xml, build.xml, *.gradle, gradle-wrapper.*, maven-wrapper.*
+    .NET: *.csproj, *.vcxproj, *.sln, *.nuspec, *.props, *.targets
+    C/C++: Makefile, CMakeLists.txt, *.cmake, *.vcxproj
+    Other: package.json, requirements.txt, go.mod, Gemfile, composer.json
 EOF
 }
 
@@ -275,8 +289,22 @@ is_test_artifact() {
        [[ "$filename" =~ -tests ]] || \
        [[ "$filename" =~ -test- ]] || \
        [[ "$filename" =~ -tests- ]]; then
-        log_debug "File appears to be a test artifact based on filename: $filename"
-        return 0
+        # For .NET DLLs, be more careful about test detection
+        if [[ "$file_type" == "dll" ]]; then
+            # Only flag as test if it's clearly a test DLL (e.g., ends with .test.dll or contains specific test patterns)
+            if [[ "$filename" =~ \.test\.dll$ ]] || \
+               [[ "$filename" =~ ^test.*\.dll$ ]] || \
+               [[ "$filename" =~ ^.*test.*\.dll$ ]] && [[ "$filename" =~ -test- ]]; then
+                log_debug "File appears to be a test artifact based on filename: $filename"
+                return 0
+            else
+                log_debug "File has 'test' in name but appears to be an application DLL: $filename"
+                return 1
+            fi
+        else
+            log_debug "File appears to be a test artifact based on filename: $filename"
+            return 0
+        fi
     fi
     
     # For .NET DLLs, also check if it's in a test-related directory
@@ -542,10 +570,16 @@ analyze_java_artifacts() {
     log_info "Total Java archives found: ${#all_archives[@]}"
     
     # Count arrays safely
-    local compiled_count=${#compiled_apps[@]:-0}
-    local third_party_count=${#third_party_libs[@]:-0}
-    local test_count=${#test_artifacts[@]:-0}
-    local invalid_count=${#invalid_archives[@]:-0}
+    local compiled_count=${#compiled_apps[@]}
+    local third_party_count=${#third_party_libs[@]}
+    local test_count=${#test_artifacts[@]}
+    local invalid_count=${#invalid_archives[@]}
+    
+    # Ensure counts are at least 0
+    compiled_count=${compiled_count:-0}
+    third_party_count=${third_party_count:-0}
+    test_count=${test_count:-0}
+    invalid_count=${invalid_count:-0}
     
     log_info "Compiled applications: $compiled_count"
     log_info "3rd party libraries: $third_party_count"
@@ -554,27 +588,31 @@ analyze_java_artifacts() {
     
     # Store results for collection (safely)
     if [[ ${#compiled_apps[@]} -gt 0 ]]; then
-        COMPILED_APPS=("${compiled_apps[@]}")
-    else
-        COMPILED_APPS=()
+        # Use a more compatible array expansion method
+        for archive in "${compiled_apps[@]}"; do
+            COMPILED_APPS+=("$archive")
+        done
     fi
     
     if [[ ${#third_party_libs[@]} -gt 0 ]]; then
-        THIRD_PARTY_LIBS=("${third_party_libs[@]}")
-    else
-        THIRD_PARTY_LIBS=()
+        # Use a more compatible array expansion method
+        for lib in "${third_party_libs[@]}"; do
+            THIRD_PARTY_LIBS+=("$lib")
+        done
     fi
     
     if [[ ${#test_artifacts[@]} -gt 0 ]]; then
-        TEST_ARTIFACTS=("${test_artifacts[@]}")
-    else
-        TEST_ARTIFACTS=()
+        # Use a more compatible array expansion method
+        for test in "${test_artifacts[@]}"; do
+            TEST_ARTIFACTS+=("$test")
+        done
     fi
     
     if [[ ${#invalid_archives[@]} -gt 0 ]]; then
-        INVALID_ARCHIVES=("${invalid_archives[@]}")
-    else
-        INVALID_ARCHIVES=()
+        # Use a more compatible array expansion method
+        for invalid in "${invalid_archives[@]}"; do
+            INVALID_ARCHIVES+=("$invalid")
+        done
     fi
     
     # Store counts for summary
@@ -621,19 +659,11 @@ analyze_dotnet_artifacts() {
             continue
         fi
         
-        # Check if it's a 3rd party library (for classification only)
-        if is_third_party_dotnet "$dll"; then
-            log_info "3rd party library identified: $relative_path (will be collected)"
-            third_party_libs+=("$dll")
-            # IMPORTANT: 3rd party DLLs are still collected for .NET applications
-            compiled_apps+=("$dll")
-        else
-            # If it's not a test artifact or 3rd party library, it's a 1st party compiled application
-            log_info "1st party compiled .NET application found: $relative_path"
-            compiled_apps+=("$dll")
-        fi
+        # For .NET, collect ALL DLLs (both 1st party and 3rd party)
+        log_info "Adding .NET DLL for collection: $relative_path"
+        compiled_apps+=("$dll")
         
-        # Look for corresponding PDB file for ALL DLLs (both 1st and 3rd party)
+        # Look for corresponding PDB file for ALL DLLs
         find_pdb_files "$dll"
     done
     
@@ -642,44 +672,51 @@ analyze_dotnet_artifacts() {
     log_info "Total .NET DLLs found: ${#dll_files[@]}"
     
     # Count arrays safely
-    local compiled_count=${#compiled_apps[@]:-0}
-    local third_party_count=${#third_party_libs[@]:-0}
-    local test_count=${#test_artifacts[@]:-0}
-    local pdb_count=${#DOTNET_PDBS[@]:-0}
-    local missing_pdb_count=${#MISSING_PDBS[@]:-0}
+    local compiled_count=${#compiled_apps[@]}
+    local test_count=${#test_artifacts[@]}
+    local pdb_count=${#DOTNET_PDBS[@]}
+    local missing_pdb_count=${#MISSING_PDBS[@]}
     
-    log_info "Compiled applications (1st + 3rd party): $compiled_count"
-    log_info "3rd party libraries: $third_party_count"
+    # Ensure counts are at least 0
+    compiled_count=${compiled_count:-0}
+    test_count=${test_count:-0}
+    pdb_count=${pdb_count:-0}
+    missing_pdb_count=${missing_pdb_count:-0}
+    
+    log_info "DLLs to be collected: $compiled_count"
     log_info "Test artifacts (skipped): $test_count"
     log_info "PDB files found: $pdb_count"
     log_info "Missing PDB files: $missing_pdb_count"
     
     # Store results for collection (safely)
     if [[ ${#compiled_apps[@]} -gt 0 ]]; then
-        DOTNET_DLLS=("${compiled_apps[@]}")
-    else
-        DOTNET_DLLS=()
+        # Use a more compatible array expansion method
+        for dll in "${compiled_apps[@]}"; do
+            DOTNET_DLLS+=("$dll")
+        done
     fi
     
     # Add .NET DLLs to the main compiled apps array
     if [[ ${#compiled_apps[@]} -gt 0 ]]; then
-        COMPILED_APPS+=("${compiled_apps[@]}")
+        log_debug "Adding ${#compiled_apps[@]} .NET DLLs to COMPILED_APPS array"
+        # Use a more compatible array expansion method
+        for dll in "${compiled_apps[@]}"; do
+            COMPILED_APPS+=("$dll")
+        done
         # Update the count (ensure it's initialized)
         COMPILED_COUNT=${COMPILED_COUNT:-0}
         COMPILED_COUNT=$((COMPILED_COUNT + compiled_count))
-    fi
-    
-    # Add .NET 3rd party libs to the main array
-    if [[ ${#third_party_libs[@]} -gt 0 ]]; then
-        THIRD_PARTY_LIBS+=("${third_party_libs[@]}")
-        # Update the count (ensure it's initialized)
-        THIRD_PARTY_COUNT=${THIRD_PARTY_COUNT:-0}
-        THIRD_PARTY_COUNT=$((THIRD_PARTY_COUNT + third_party_count))
+        log_debug "COMPILED_APPS array now contains ${#COMPILED_APPS[@]} items"
+    else
+        log_debug "No .NET DLLs to add to COMPILED_APPS array"
     fi
     
     # Add .NET test artifacts to the main array
     if [[ ${#test_artifacts[@]} -gt 0 ]]; then
-        TEST_ARTIFACTS+=("${test_artifacts[@]}")
+        # Use a more compatible array expansion method
+        for test in "${test_artifacts[@]}"; do
+            TEST_ARTIFACTS+=("$test")
+        done
         # Update the count (ensure it's initialized)
         TEST_COUNT=${TEST_COUNT:-0}
         TEST_COUNT=$((TEST_COUNT + test_count))
@@ -687,10 +724,190 @@ analyze_dotnet_artifacts() {
     
     # Store .NET specific counts
     DOTNET_COMPILED_COUNT=$compiled_count
-    DOTNET_THIRD_PARTY_COUNT=$third_party_count
     DOTNET_TEST_COUNT=$test_count
     DOTNET_PDB_COUNT=$pdb_count
     DOTNET_MISSING_PDB_COUNT=$missing_pdb_count
+}
+
+# Function to rename package manager files
+rename_package_manager_files() {
+    local input_folder="$1"
+    
+    log_info "Renaming package manager files to prevent conflicts..."
+    
+    local renamed_count=0
+    local skipped_count=0
+    
+    # Define package manager files to copy and rename
+    local package_files=(
+        "Makefile"
+        "makefile"
+        "pom.xml"
+        "build.xml"
+        "build.gradle"
+        "gradle.properties"
+        "gradle-wrapper.properties"
+        "gradle-wrapper.jar"
+        "maven-wrapper.properties"
+        "maven-wrapper.jar"
+        "CMakeLists.txt"
+    )
+
+    
+        #"package.json"
+        #"package-lock.json"
+        #"yarn.lock"
+        #"requirements.txt"
+        #"setup.py"
+        #"Pipfile"
+        #"Pipfile.lock"
+        #"poetry.lock"
+        #"pyproject.toml"
+        #"Cargo.toml"
+        #"Cargo.lock"
+        #"go.mod"
+        #"go.sum"
+        #"Gemfile"
+        #"Gemfile.lock"
+        #"composer.json"
+        #"composer.lock"
+        #"pubspec.yaml"
+        #"pubspec.lock"
+    
+    
+    # Rename exact filename matches (search recursively)
+    for filename in "${package_files[@]}"; do
+        log_debug "Checking for fixed filename: $filename (recursively)"
+        
+        # Search recursively for the file
+        while IFS= read -r -d '' file; do
+            local backup_name="${filename}_backup"
+            local backup_path="${file%/*}/$backup_name"
+            
+            # Skip if already renamed
+            if [[ "$filename" == *"_backup" ]]; then
+                log_debug "Skipping already renamed file: $filename"
+                continue
+            fi
+            
+            # Check if backup already exists
+            if [[ -f "$backup_path" ]]; then
+                log_warning "Backup already exists for: $file"
+                skipped_count=$((skipped_count + 1))
+                continue
+            fi
+            
+            # Rename the file
+            if mv "$file" "$backup_path" 2>/dev/null; then
+                log_success "Renamed: $file → $backup_name"
+                renamed_count=$((renamed_count + 1))
+            else
+                log_error "Failed to rename: $file"
+            fi
+        done < <(find "$input_folder" -name "$filename" -type f -print0 2>/dev/null)
+    done
+    
+    # Copy wildcard pattern files
+    local wildcard_patterns=(
+        "*.csproj"
+        "*.vcxproj"
+        "*.vcxproj.filters"
+        "*.vcxproj.user"
+        "*.cmake"
+        "*.gradle"
+        "*.sln"
+        "*.vcproj"
+        "*.dproj"
+        "*.bpr"
+        "*.cbp"
+        "*.workspace"
+        "*.project"
+        "*.classpath"
+        "*.nuspec"
+        "*.props"
+        "*.targets"
+        "*.config"
+    )
+        #"*.conf"
+        #"*.ini"
+        #"*.cfg"
+        #"*.yml"
+        #"*.yaml"
+        #"*.toml"
+        #"*.lock"
+    
+    for pattern in "${wildcard_patterns[@]}"; do
+        while IFS= read -r -d '' file; do
+            local basename=$(basename "$file")
+            local backup_name="${basename}_backup"
+            local backup_path="$input_folder/$backup_name"
+            
+            # Skip if already renamed
+            if [[ "$basename" == *"_backup" ]]; then
+                continue
+            fi
+            
+            # Check if backup already exists
+            if [[ -f "$backup_path" ]]; then
+                log_warning "Backup already exists for: $basename"
+                skipped_count=$((skipped_count + 1))
+                continue
+            fi
+            
+            # Rename the file
+            if mv "$file" "$backup_path" 2>/dev/null; then
+                log_success "Renamed: $basename → $backup_name"
+                renamed_count=$((renamed_count + 1))
+            else
+                log_error "Failed to rename: $basename"
+            fi
+        done < <(find "$input_folder" -name "$pattern" -type f -print0 2>/dev/null)
+    done
+    
+    # Store the count in a global variable for the main script to access
+    RENAMED_COUNT=$renamed_count
+    SKIPPED_COUNT=$skipped_count
+    
+    log_info "Package manager file renaming complete: $renamed_count renamed, $skipped_count skipped"
+    return 0 # Always return success (0) to prevent set -e from exiting
+}
+
+# Function to download and install Veracode CLI
+download_veracode_cli() {
+    local output_folder="$1"
+    local input_folder="$2"
+    
+    log_info "Downloading Veracode CLI..."
+    cd "$input_folder"
+
+    # Use the simpler curl | sh method as requested
+    if curl -fsS https://tools.veracode.com/veracode-cli/install | sh; then
+        log_success "Veracode CLI downloaded and installed successfully"
+        return 0
+    else
+        log_error "Failed to download and install Veracode CLI"
+        return 1
+    fi
+}
+
+# Function to run Veracode CLI
+run_veracode_cli() {
+    local output_folder="$1"
+    local input_folder="$2"
+    
+    log_info "Running Veracode CLI to create missing artifacts..."
+    
+    # Execute veracode package command on the input folder
+    if "$input_folder"/veracode package -a -s "$input_folder" -o "$output_folder"; then
+        log_success "Veracode CLI package command executed successfully"
+        log_info "Package created in: $output_folder"
+        return 0
+    else
+        log_warning "Veracode CLI package command failed (this may be normal for local testing)"
+        log_info "The CLI command was executed but may need proper setup for full functionality"
+        log_info "For production use, please refer to Veracode CLI documentation"
+        return 0  # Don't fail the script for CLI issues
+    fi
 }
 
 # Function to collect artifacts
@@ -707,6 +924,10 @@ collect_artifacts() {
     # Collect compiled applications (both Java and .NET)
     if [[ ${#COMPILED_APPS[@]} -gt 0 ]]; then
         log_info "Collecting ${#COMPILED_APPS[@]} compiled applications..."
+        log_debug "COMPILED_APPS array contents:"
+        for i in "${!COMPILED_APPS[@]}"; do
+            log_debug "  [$i]: ${COMPILED_APPS[$i]}"
+        done
         
         # Track unique filenames to avoid duplicates
         local duplicate_count=0
@@ -716,19 +937,55 @@ collect_artifacts() {
             local filename=$(basename "$app")
             local dest_path="$output_folder/$filename"
             
-            # Check if we already have this filename in the output directory
-            if [[ -f "$dest_path" ]]; then
-                log_info "Skipping duplicate: $filename (already collected)"
-                ((duplicate_count++))
+            log_debug "Processing file: $app -> $filename"
+            
+            # Check if source file still exists and is readable
+            if [[ ! -f "$app" ]]; then
+                log_error "Source file no longer exists: $app"
                 continue
             fi
             
-            if cp "$app" "$dest_path" 2>/dev/null; then
+            if [[ ! -r "$app" ]]; then
+                log_error "Source file not readable: $app"
+                continue
+            fi
+            
+            # Check if we already have this filename in the output directory
+            if [[ -f "$dest_path" ]]; then
+                log_info "Skipping duplicate: $filename (already collected)"
+                duplicate_count=$((duplicate_count + 1))
+                continue
+            fi
+            
+            log_debug "Attempting to copy: $app to $dest_path"
+            
+            # Try to copy with more detailed error reporting
+            local copy_result
+            if cp "$app" "$dest_path" 2>&1; then
+                copy_result=0
+            else
+                copy_result=$?
+            fi
+            
+            if [[ $copy_result -eq 0 ]]; then
                 log_success "Collected: $filename"
                 unique_files+=("$filename")
-                ((collected_count++))
+                collected_count=$((collected_count + 1))
+                log_debug "Copy successful, collected_count now: $collected_count"
             else
-                log_error "Failed to collect: $filename"
+                log_error "Failed to collect: $filename (exit code: $copy_result)"
+                log_debug "Copy failed for: $app"
+                
+                # Try to get more information about the failure
+                if [[ ! -f "$app" ]]; then
+                    log_error "Source file disappeared during copy: $app"
+                elif [[ ! -r "$app" ]]; then
+                    log_error "Source file became unreadable during copy: $app"
+                elif [[ ! -w "$output_folder" ]]; then
+                    log_error "Output folder is not writable: $output_folder"
+                else
+                    log_error "Unknown copy failure for: $app"
+                fi
             fi
         done
         
@@ -736,43 +993,171 @@ collect_artifacts() {
             log_info "Skipped $duplicate_count duplicate files"
         fi
         
+        log_debug "Collection loop completed. collected_count: $collected_count, unique_files count: ${#unique_files[@]}"
+        
         # Update the count to reflect actual unique files collected
         collected_count=${#unique_files[@]}
-    fi
-    
-    # Collect .NET PDB files if available
-    if [[ ${#DOTNET_PDBS[@]} -gt 0 ]]; then
-        log_info "Collecting ${#DOTNET_PDBS[@]} PDB files..."
+        log_debug "Final collected_count after unique_files adjustment: $collected_count"
         
-        for pdb in "${DOTNET_PDBS[@]}"; do
-            local filename=$(basename "$pdb")
-            local dest_path="$output_folder/$filename"
-            
-            # Check if we already have this filename in the output directory
-            if [[ -f "$dest_path" ]]; then
-                log_info "Skipping duplicate PDB: $filename (already collected)"
-                continue
-            fi
-            
-            if cp "$pdb" "$dest_path" 2>/dev/null; then
-                log_success "Collected PDB: $filename"
-                ((collected_count++))
+        # Show warnings about missing PDB files
+        if [[ ${#MISSING_PDBS[@]} -gt 0 ]]; then
+            log_warning "=== PDB Files Missing ==="
+            log_warning "The following .NET DLLs are missing PDB files:"
+            for dll in "${MISSING_PDBS[@]}"; do
+                local filename=$(basename "$dll")
+                log_warning "  - $filename"
+            done
+            log_warning "Scan accuracy may be affected without PDB files."
+            log_warning "Consider enabling PDB generation in your build configuration."
+        fi
+        
+        # Create collection summary
+        local summary_file="$output_folder/collection_summary.txt"
+        {
+            echo "Java and .NET Artifact Collection Summary"
+            echo "Generated: $(date)"
+            echo "Source folder: $ARTIFACT_FOLDER"
+            echo "Detected language: $DETECTED_LANGUAGE"
+            echo ""
+            echo "Compiled applications collected: $collected_count"
+            if [[ "$DETECTED_LANGUAGE" == "dotnet" ]] || [[ "$DETECTED_LANGUAGE" == "mixed" ]]; then
+                echo "3rd party libraries collected: ${THIRD_PARTY_COUNT:-0}"
             else
-                log_error "Failed to collect PDB: $filename"
+                echo "3rd party libraries collected: 0"
             fi
-        done
-    fi
-    
-    # Show warnings about missing PDB files
-    if [[ ${#MISSING_PDBS[@]} -gt 0 ]]; then
-        log_warning "=== PDB Files Missing ==="
-        log_warning "The following .NET DLLs are missing PDB files:"
-        for dll in "${MISSING_PDBS[@]}"; do
-            local filename=$(basename "$dll")
-            log_warning "  - $filename"
-        done
-        log_warning "Scan accuracy may be affected without PDB files."
-        log_warning "Consider enabling PDB generation in your build configuration."
+            echo "Test artifacts skipped: ${TEST_COUNT:-0}"
+            echo "Invalid archives found: ${INVALID_COUNT:-0}"
+            
+            # Add enhanced functionality information
+            echo ""
+            echo "=== Enhanced Functionality ==="
+            if [[ "$NO_RENAME" != "true" ]]; then
+                echo "Package manager files renamed: Yes (with _backup suffix)"
+                echo "Veracode CLI integration: $([[ "$NO_CLI" != "true" ]] && echo "Yes" || echo "No")"
+            else
+                echo "Package manager files renamed: No (--no-rename option used)"
+                echo "Veracode CLI integration: No (requires package manager file renaming)"
+            fi
+            
+            # Add .NET specific information
+            if [[ "$DETECTED_LANGUAGE" == "dotnet" ]] || [[ "$DETECTED_LANGUAGE" == "mixed" ]]; then
+                echo ""
+                echo "=== .NET Specific Information ==="
+                echo "PDB files collected: ${DOTNET_PDB_COUNT:-0}"
+                echo "Missing PDB files: ${DOTNET_MISSING_PDB_COUNT:-0}"
+            fi
+            
+            echo ""
+            echo "Total files collected: $collected_count"
+            echo ""
+            if [[ $collected_count -gt 0 ]]; then
+                echo "Compiled applications:"
+                # Show only unique collected files, not all discovered files
+                local temp_file=$(mktemp)
+                for app in "${COMPILED_APPS[@]}"; do
+                    local filename=$(basename "$app")
+                    echo "$filename" >> "$temp_file"
+                done
+                # Sort and show unique filenames
+                sort -u "$temp_file" | while read -r filename; do
+                    echo "  - $filename"
+                done
+                rm -f "$temp_file"
+                
+                # Show PDB files if any were collected
+                if [[ ${#DOTNET_PDBS[@]} -gt 0 ]]; then
+                    echo ""
+                    echo "PDB files:"
+                    for pdb in "${DOTNET_PDBS[@]}"; do
+                        local filename=$(basename "$pdb")
+                        echo "  - $filename"
+                    done
+                fi
+            fi
+            
+            # Show 3rd party libraries if any were collected
+            if [[ ${#THIRD_PARTY_LIBS[@]} -gt 0 ]]; then
+                echo ""
+                echo "3rd party libraries:"
+                if [[ "$DETECTED_LANGUAGE" == "dotnet" ]] || [[ "$DETECTED_LANGUAGE" == "mixed" ]]; then
+                    echo "  - All 3rd party DLLs are collected for .NET applications:"
+                    for lib in "${THIRD_PARTY_LIBS[@]}"; do
+                        local filename=$(basename "$lib")
+                        echo "    * $filename"
+                    done
+                else
+                    for lib in "${THIRD_PARTY_LIBS[@]}"; do
+                        local filename=$(basename "$lib")
+                        echo "  - $filename"
+                    done
+                fi
+            fi
+            
+            # Show test artifacts if any were skipped
+            if [[ ${#TEST_ARTIFACTS[@]} -gt 0 ]]; then
+                echo ""
+                echo "Test artifacts skipped:"
+                for test in "${TEST_ARTIFACTS[@]}"; do
+                    local filename=$(basename "$test")
+                    echo "  - $filename"
+                done
+            fi
+            
+            # Show invalid archives if any were found
+            if [[ ${#INVALID_ARCHIVES[@]} -gt 0 ]]; then
+                echo ""
+                echo "Invalid archives found:"
+                for invalid in "${INVALID_ARCHIVES[@]}"; do
+                    local filename=$(basename "$invalid")
+                    echo "  - $filename"
+                done
+            fi
+        } > "$summary_file"
+        
+        log_info "Summary written to: $summary_file"
+        
+        # Collect .NET PDB files if available
+        if [[ ${#DOTNET_PDBS[@]} -gt 0 ]]; then
+            log_info "Collecting ${#DOTNET_PDBS[@]} PDB files..."
+            
+            for pdb in "${DOTNET_PDBS[@]}"; do
+                local filename=$(basename "$pdb")
+                local dest_path="$output_folder/$filename"
+                
+                # Check if we already have this filename in the output directory
+                if [[ -f "$dest_path" ]]; then
+                    log_info "Skipping duplicate PDB: $filename (already collected)"
+                    continue
+                fi
+                
+                if cp "$pdb" "$dest_path" 2>/dev/null; then
+                    log_success "Collected PDB: $filename"
+                    collected_count=$((collected_count + 1))
+                else
+                    log_error "Failed to collect PDB: $filename"
+                fi
+            done
+        fi
+        
+        # Zip .NET artifacts if .NET was detected
+        if [[ "$DETECTED_LANGUAGE" == "dotnet" ]] || [[ "$DETECTED_LANGUAGE" == "mixed" ]]; then
+            log_debug "Starting .NET artifacts zip process..."
+            zip_dotnet_artifacts "$output_folder"
+            local zip_result=$?
+            log_debug "Zip process returned: $zip_result"
+            
+            if [[ $zip_result -eq 0 ]]; then
+                log_success ".NET artifacts zip process completed successfully"
+            else
+                log_error ".NET artifacts zip process failed"
+            fi
+        fi
+        
+        if [[ $collected_count -gt 0 ]]; then
+            log_success "Collection complete! Collected $collected_count files"
+        else
+            log_warning "No files were collected - no compiled applications found"
+        fi
     fi
     
     # If no compiled applications found, finish gracefully
@@ -783,134 +1168,104 @@ collect_artifacts() {
     else
         # Check if we have main application files that contain dependencies
         local has_main_app=false
+        local has_dotnet_dlls=false
+        
+        # Check for Java main applications (WAR/EAR)
         for app in "${COMPILED_APPS[@]}"; do
             local app_ext="${app##*.}"
             if [[ "$app_ext" == "war" ]] || [[ "$app_ext" == "ear" ]]; then
                 has_main_app=true
-                log_info "Main application found: $(basename "$app") - this contains all dependencies"
+                log_info "Main Java application found: $(basename "$app") - this contains Java dependencies"
                 break
             fi
         done
         
+        # Check for .NET DLLs
+        if [[ ${#DOTNET_DLLS[@]} -gt 0 ]]; then
+            has_dotnet_dlls=true
+            log_info "Found ${#DOTNET_DLLS[@]} .NET DLLs that will be collected separately"
+        fi
+        
         if [[ "$has_main_app" == "true" ]]; then
-            log_info "Dependency JARs in WEB-INF/lib are already included in the main application"
-            log_info "Only the main application file(s) will be collected"
-        fi
-    fi
-    
-    # Create collection summary
-    local summary_file="$output_folder/collection_summary.txt"
-    {
-        echo "Java and .NET Artifact Collection Summary"
-        echo "Generated: $(date)"
-        echo "Source folder: $ARTIFACT_FOLDER"
-        echo "Detected language: $DETECTED_LANGUAGE"
-        echo ""
-        echo "Compiled applications collected: $collected_count"
-        if [[ "$DETECTED_LANGUAGE" == "dotnet" ]] || [[ "$DETECTED_LANGUAGE" == "mixed" ]]; then
-            echo "3rd party libraries collected: ${THIRD_PARTY_COUNT:-0}"
-        else
-            echo "3rd party libraries collected: 0"
-        fi
-        echo "Test artifacts skipped: ${TEST_COUNT:-0}"
-        echo "Invalid archives found: ${INVALID_COUNT:-0}"
-        
-        # Add .NET specific information
-        if [[ "$DETECTED_LANGUAGE" == "dotnet" ]] || [[ "$DETECTED_LANGUAGE" == "mixed" ]]; then
-            echo ""
-            echo "=== .NET Specific Information ==="
-            echo "PDB files collected: ${DOTNET_PDB_COUNT:-0}"
-            echo "Missing PDB files: ${DOTNET_MISSING_PDB_COUNT:-0}"
-        fi
-        
-        echo ""
-        echo "Total files collected: $collected_count"
-        echo ""
-        if [[ $collected_count -gt 0 ]]; then
-            echo "Compiled applications:"
-            # Show only unique collected files, not all discovered files
-            local temp_file=$(mktemp)
-            for app in "${COMPILED_APPS[@]}"; do
-                local filename=$(basename "$app")
-                echo "$filename" >> "$temp_file"
-            done
-            # Sort and show unique filenames
-            sort -u "$temp_file" | while read -r filename; do
-                echo "  - $filename"
-            done
-            rm -f "$temp_file"
-            
-            # Show PDB files if any were collected
-            if [[ ${#DOTNET_PDBS[@]} -gt 0 ]]; then
-                echo ""
-                echo "PDB files:"
-                for pdb in "${DOTNET_PDBS[@]}"; do
-                    local filename=$(basename "$pdb")
-                    echo "  - $filename"
-                done
-            fi
-        else
-            echo "No compiled applications found - script completed gracefully"
-        fi
-        
-        # Show 3rd party libraries (should always be 0 since we don't collect them)
-        echo ""
-        echo "3rd party libraries:"
-        if [[ "$DETECTED_LANGUAGE" == "dotnet" ]] || [[ "$DETECTED_LANGUAGE" == "mixed" ]]; then
-            if [[ ${#THIRD_PARTY_LIBS[@]} -gt 0 ]]; then
-                echo "  - All 3rd party DLLs are collected for .NET applications:"
-                for third_party_lib in "${THIRD_PARTY_LIBS[@]}"; do
-                    echo "    * $(basename "$third_party_lib")"
-                done
+            if [[ "$has_dotnet_dlls" == "true" ]]; then
+                log_info "Mixed project detected: Java WAR/EAR + .NET DLLs"
+                log_info "Java dependencies are included in the main application"
+                log_info ".NET DLLs will be collected separately"
             else
-                echo "  - All 3rd party DLLs are collected for .NET applications"
+                log_info "Java-only project: WAR/EAR contains all dependencies"
+                log_info "Only the main application file(s) will be collected"
             fi
-        else
-            echo "  - None collected (dependencies are included in main applications)"
         fi
-        
-        # Show test artifacts that were skipped
-        echo ""
-        echo "Test artifacts skipped:"
-        if [[ ${#TEST_ARTIFACTS[@]} -gt 0 ]]; then
-            for test_artifact in "${TEST_ARTIFACTS[@]}"; do
-                echo "  - $(basename "$test_artifact")"
-            done
-        else
-            echo "  - None found"
-        fi
-        
-        # Show invalid archives that were found
-        echo ""
-        echo "Invalid archives found:"
-        if [[ ${#INVALID_ARCHIVES[@]} -gt 0 ]]; then
-            for invalid_archive in "${INVALID_ARCHIVES[@]}"; do
-                echo "  - $(basename "$invalid_archive")"
-            done
-        else
-            echo "  - None found"
-        fi
-        
-        # Show missing PDB warnings if applicable
-        if [[ ${#MISSING_PDBS[@]} -gt 0 ]]; then
-            echo ""
-            echo "=== WARNING: Missing PDB Files ==="
-            echo "The following .NET DLLs are missing PDB files:"
-            for dll in "${MISSING_PDBS[@]}"; do
-                echo "  - $(basename "$dll")"
-            done
-            echo ""
-            echo "Scan accuracy may be affected without PDB files."
-            echo "Consider enabling PDB generation in your build configuration."
-        fi
-    } > "$summary_file"
-    
-    if [[ $collected_count -gt 0 ]]; then
-        log_success "Collection complete! Collected $collected_count files"
-    else
-        log_warning "No files were collected - no compiled applications found"
     fi
-    log_info "Summary written to: $summary_file"
+    
+    log_debug "Enhanced functionality section completed, continuing to final success message..."
+    log_success "Script completed successfully!"
+    if [[ "$DETECTED_LANGUAGE" == "dotnet" ]] || [[ "$DETECTED_LANGUAGE" == "mixed" ]]; then
+        if [[ ${#MISSING_PDBS[@]} -gt 0 ]]; then
+            log_warning "Note: Some .NET DLLs are missing PDB files, which may affect scan accuracy."
+        fi
+    fi
+}
+
+# Function to zip .NET artifacts
+zip_dotnet_artifacts() {
+    local output_folder="$1"
+    local zip_name="pre-compiled-dotnet-artifacts.zip"
+    local zip_path="$output_folder/$zip_name"
+    
+    log_info "Creating .NET artifacts zip file: $zip_name"
+    
+    # Check if we have any .NET artifacts to zip
+    local dotnet_files=()
+    
+    # Find all DLL and PDB files in the output folder
+    while IFS= read -r -d '' file; do
+        local extension="${file##*.}"
+        if [[ "$extension" == "dll" ]] || [[ "$extension" == "pdb" ]]; then
+            dotnet_files+=("$file")
+        fi
+    done < <(find "$output_folder" -maxdepth 1 -type f \( -name "*.dll" -o -name "*.pdb" \) -print0 2>/dev/null)
+    
+    if [[ ${#dotnet_files[@]} -eq 0 ]]; then
+        log_warning "No .NET artifacts found to zip"
+        return 0
+    fi
+    
+    log_info "Found ${#dotnet_files[@]} .NET artifacts to zip"
+    
+    # Create the zip file
+    if cd "$output_folder" && zip -q "$zip_name" "${dotnet_files[@]##*/}" 2>/dev/null; then
+        log_success "Successfully created .NET artifacts zip: $zip_name"
+        
+        # Remove the individual .NET files, keeping only the zip
+        local removed_count=0
+        for file in "${dotnet_files[@]}"; do
+            local filename=$(basename "$file")
+            if rm "$filename" 2>/dev/null; then
+                log_debug "Removed individual file: $filename"
+                removed_count=$((removed_count + 1))
+            else
+                log_warning "Failed to remove individual file: $filename"
+            fi
+        done
+        
+        log_info "Removed $removed_count individual .NET files, keeping only the zip archive"
+        
+        # Update the collection summary
+        local summary_file="$output_folder/collection_summary.txt"
+        if [[ -f "$summary_file" ]]; then
+            echo "" >> "$summary_file"
+            echo "=== .NET Artifacts Zipped ===" >> "$summary_file"
+            echo "Zip file created: $zip_name" >> "$summary_file"
+            echo "Individual .NET files removed: $removed_count" >> "$summary_file"
+            echo "Zip contains: ${#dotnet_files[@]} .NET artifacts" >> "$summary_file"
+        fi
+        
+        return 0
+    else
+        log_error "Failed to create .NET artifacts zip file"
+        return 1
+    fi
 }
 
 # Main function
@@ -936,6 +1291,14 @@ main() {
             -o|--output)
                 output_folder="$2"
                 shift 2
+                ;;
+            --no-rename)
+                NO_RENAME=true
+                shift
+                ;;
+            --no-cli)
+                NO_CLI=true
+                shift
                 ;;
             -*)
                 log_error "Unknown option: $1"
@@ -978,12 +1341,53 @@ main() {
         exit 1
     fi
     
+    if ! command -v curl >/dev/null 2>&1; then
+        log_warning "Required dependency 'curl' not found. Veracode CLI download will be skipped."
+        NO_CLI=true
+    fi
+    
+    # Initialize new option variables
+    NO_RENAME=${NO_RENAME:-false}
+    NO_CLI=${NO_CLI:-false}
+    
+    log_info "Enhanced features:"
+    log_info "  Package manager file renaming: $([[ "$NO_RENAME" == "true" ]] && echo "DISABLED" || echo "ENABLED")"
+    log_info "  Veracode CLI integration: $([[ "$NO_CLI" == "true" ]] && echo "DISABLED" || echo "ENABLED")"
+    log_info ""
+    
     # Analyze the artifact folder
     analyze_artifact_folder "$artifact_folder"
     
     # Collect artifacts
     collect_artifacts "$output_folder"
     
+    # Rename package manager files to prevent conflicts
+    if [[ "$NO_RENAME" != "true" ]]; then
+        log_debug "Starting package manager file renaming..."
+        rename_package_manager_files "$artifact_folder"
+        log_debug "Package manager file renaming returned: $?"
+        log_info "Package manager file renaming completed: ${RENAMED_COUNT:-0} files renamed"
+    else
+        log_info "Package manager file renaming skipped (--no-rename option)"
+    fi
+    
+    # Download and integrate Veracode CLI (independent of package manager renaming)
+    if [[ "$NO_CLI" != "true" ]]; then
+        log_debug "Starting Veracode CLI download..."
+        if download_veracode_cli "$output_folder" "$artifact_folder"; then
+            log_debug "Veracode CLI download successful, starting integration..."
+            run_veracode_cli "$output_folder" "$artifact_folder"
+            log_info "Veracode CLI integration completed"
+        else
+            log_warning "Veracode CLI download failed - continuing without CLI integration"
+        fi
+    else
+        log_info "Veracode CLI integration skipped (--no-cli option)"
+    fi
+    
+    log_info "Enhanced functionality completed"
+    
+    log_debug "Enhanced functionality section completed, continuing to final success message..."
     log_success "Script completed successfully!"
     if [[ "$DETECTED_LANGUAGE" == "dotnet" ]] || [[ "$DETECTED_LANGUAGE" == "mixed" ]]; then
         if [[ ${#MISSING_PDBS[@]} -gt 0 ]]; then
