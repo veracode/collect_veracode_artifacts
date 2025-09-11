@@ -1,0 +1,104 @@
+trigger:
+  - '*'
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  # Artifact collection
+  COLLECTION_INPUT_DIR: '$(System.DefaultWorkingDirectory)'
+  COLLECTION_OUTPUT_DIR: '$(System.DefaultWorkingDirectory)/veracode-artifacts'
+
+stages:
+- stage: CollectArtifacts
+  displayName: 'Collect Artifacts for Veracode'
+  #dependsOn: Build
+  #condition: succeeded()
+  jobs:
+  - job: CollectArtifacts
+    displayName: 'Collect and Zip Artifacts'
+    steps:
+    # Run the artifact collector
+    - task: Bash@3
+      displayName: 'Collect Artifacts'
+      inputs:
+        targetType: 'inline'
+        script: |
+          echo "=== Starting Artifact Collection ==="
+          echo "Build artifacts directory: $(COLLECTION_INPUT_DIR)"
+          echo "Collection output directory: $(COLLECTION_OUTPUT_DIR)"
+          echo ""
+          
+          #create artifacts folder
+          mkdir -p "$(COLLECTION_OUTPUT_DIR)"
+
+          pwd
+          ls -la
+
+          # Run the collector script
+          chmod +x ./collect_veracode_artifacts.sh
+          ./collect_veracode_artifacts.sh \
+            -o "$(COLLECTION_OUTPUT_DIR)" \
+            "$(COLLECTION_INPUT_DIR)"
+          
+          echo ""
+          echo "=== Collection Complete ==="
+          echo "Collected artifacts:"
+          ls -la "$(COLLECTION_OUTPUT_DIR)"
+          
+          if [ -f "$(COLLECTION_OUTPUT_DIR)/collection_summary.txt" ]; then
+            echo ""
+            echo "Collection summary:"
+            cat "$(COLLECTION_OUTPUT_DIR)/collection_summary.txt"
+          fi
+    
+    
+    # Publish the zip file as a build artifact
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish Veracode Artifacts Zip'
+      inputs:
+        pathToPublish: '$(COLLECTION_OUTPUT_DIR)'
+        artifactName: 'veracode-artifacts'
+        publishLocation: 'Container'
+
+- stage: VeracodeScan
+  displayName: 'Veracode Pipeline Scan'
+  dependsOn: CollectArtifacts
+  condition: succeeded()
+  jobs:
+  - job: PipelineScan
+    displayName: 'Veracode Pipeline Scan'
+    variables:
+      system.debug: true
+      veracodeApiId: $(vid)
+      veracodeApiSecret: $(vkey)
+      repository: |
+        {
+          "organizationName":"YOUR_ADO_ORH_NAME"
+        }
+      veracodeScan: |
+        {
+            "scansName":["Pipeline"],
+            "pipelineScan":{
+              "breakBuildOnPolicyFinding":true,
+              "breakBuildOnError":true,
+              "errorMessage":"Veracode SAST scan faced a problem. Please contact your Veracode administrator for more information. If you are a Veracode administrator, please contact Veracode support.",
+              "createWorkItems":false,
+              "filterMitigatedFlaws":true,
+              "policy":"Veracode Recommended Medium + SCA"
+            }
+          }
+    steps: 
+    - checkout: none
+    - task: DownloadPipelineArtifact@2
+      displayName: 'Download Pipeline Artifacts'
+      inputs:
+        artifactName: 'veracode-artifacts'
+        artifactType: 'pipeline'
+        targetPath: '$(System.DefaultWorkingDirectory)/veracode-artifacts'
+
+    - task: pipeline-scan@1
+      displayName: 'Pipeline Scan'
+      inputs:
+        repository: $(repository)
+        veracodeScan: $(veracodeScan)
